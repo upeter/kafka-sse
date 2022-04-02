@@ -33,7 +33,10 @@ import java.util.concurrent.ConcurrentHashMap
 data class CommitMessage(val consumerKey: String, val toCommit: Map<TopicPartition, OffsetAndMetadata>)
 
 @RestController
-class SseController(val adminClient: AdminClient, @Value("\${kafka.boostrap.server}") val boostrapServer:String) {
+class SseController(val adminClient: AdminClient,
+                    @Value("\${kafka.boostrap.server}") val boostrapServer:String,
+                    @Value("\${server.port}") val serverPort:Int,
+) {
 
     val consumers = ConcurrentHashMap<String, Pair<KafkaConsumer<*, *>, CommitMessage?>>()
 
@@ -81,9 +84,10 @@ class SseController(val adminClient: AdminClient, @Value("\${kafka.boostrap.serv
             partitionOffsets = offsets?.toKafkaOffsetMap() ?: mutableMapOf()
         ).let { (receiver, consumerKey) ->
             flow {
-                //needed to re-route ack traffic to the container, which started the SSE, since
+                //this initial event is needed to re-route ack traffic to the container, which started the SSE, since
                 //acks can only be executed by the consumer that served the original message
                 emit(consumerInfoEvent(consumerKey, "session-${uuid()}"))
+                //start consumer
                 receiver.receive().doOnSubscribe {
                     receiver.doOnConsumer{ consumer -> consumer to consumer.partitionsFor(TEST_TOPIC) }
                         .doOnSuccess{ (consumer, partitions) ->
@@ -161,8 +165,11 @@ class SseController(val adminClient: AdminClient, @Value("\${kafka.boostrap.serv
     }
 
     private fun consumerInfoEvent(consumerKey: String, sessionId: String) =
-        ServerSentEvent.builder<String>().event("consumer-data")
+        ServerSentEvent.builder<String>().event("consumer-connected")
             .data(objectMapper.writeValueAsString(mapOf("consumerId" to consumerKey, "sessionId" to sessionId)))
+            .comment("This metadata is needed to acknowledge offsets via a separate PUT request to: http://localhost:$serverPort/consumers/$consumerKey/offsets/{offsets}. " +
+                    "\n- Provide the offsets in the form of: <partition1>:<offset1>,<partition-n>:<offset-n>. E.g. 0:10,1:20,2:23" +
+                    "\n- Use a cookie SessionId=[$sessionId] so that the ack request can be routed to the container of the consumer that serves the SSE connection")
             .build()
 
     companion object {
