@@ -33,9 +33,10 @@ import java.util.concurrent.ConcurrentHashMap
 data class CommitMessage(val consumerKey: String, val toCommit: Map<TopicPartition, OffsetAndMetadata>)
 
 @RestController
-class SseController(val adminClient: AdminClient,
-                    @Value("\${kafka.boostrap.server}") val boostrapServer:String,
-                    @Value("\${server.port}") val serverPort:Int,
+class SseController(
+    val adminClient: AdminClient,
+    @Value("\${kafka.boostrap.server}") val boostrapServer: String,
+    @Value("\${server.port}") val serverPort: Int,
 ) {
 
     val consumers = ConcurrentHashMap<String, Pair<KafkaConsumer<*, *>, CommitMessage?>>()
@@ -55,7 +56,7 @@ class SseController(val adminClient: AdminClient,
     suspend fun offset(@PathVariable("consumerKey") consumerKey: String, @PathVariable("offsets") offsets: String) {
         val toCommit = offsets.toKafkaOffsetMap().map { (partition, offset) ->
             TopicPartition(TEST_TOPIC, partition) to OffsetAndMetadata(offset)
-        }.toMap().let{CommitMessage(consumerKey, it)}
+        }.toMap().let { CommitMessage(consumerKey, it) }
 
         //Commit via admin API only works when NOT consumer is connected
         //val result = adminClient.alterConsumerGroupOffsets(group, toCommit)
@@ -69,8 +70,61 @@ class SseController(val adminClient: AdminClient,
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    @GetMapping("/events/sse", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
+    @GetMapping("/events/ack/sse", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
     suspend fun offsetSSEFlowWithHeartbeat(
+        @RequestParam("group", defaultValue = "news-group-1") group: String = "news-group-1",
+        response: ServerHttpResponse,
+    ): Flow<ServerSentEvent<String>> = coroutineScope {
+        response.headers.apply {
+            set("X-Accel-Buffering", "no")
+            set("Cache-Control", "no-cache")
+        }
+        receiver(group = group).let { (receiver, consumerKey) ->
+            flow {
+                //this initial event is needed to re-route ack traffic to the container, which started the SSE, since
+                //acks can only be executed by the consumer that served the original message
+                emit(consumerInfoEvent(consumerKey, "session-${uuid()}"))
+                //start consumer
+                receiver.receive().doOnSubscribe {
+                    receiver.doOnConsumer { consumer -> consumer to consumer.partitionsFor(TEST_TOPIC) }
+                        .doOnSuccess { (consumer, partitions) ->
+                            log.info("Partitions for ${consumer.groupMetadata()}: $partitions")
+                            val underlying = underlyingKafkaConsumer(consumer)
+                            consumers[consumerKey] = underlying to null
+                            log.info("Added consumer with key=[$consumerKey]")
+                        }.subscribe()
+                }.asFlow().collect { rec ->
+                    // receiver.receive().asFlow().collect { rec ->
+                    "key=${rec.key()} offset=${rec.offset()} partition=${rec.partition()} topic=${rec.topic()}".also(log::info)
+                    val offset = "${rec.partition()}:${rec.offset()}"
+                    //here we commit the previously received offset, which MUST happen here, because the
+                    //KafkaConsumer must be addressed within it's dedicated Thread. The dedicated Thread
+                    //is only available here
+                    consumers[consumerKey]?.let { (consumer, commitMessage) ->
+                        commitMessage?.let { consumer.commitSync(commitMessage.toCommit) }
+                        log.info("Committed $commitMessage")
+                    }
+                    emit(ServerSentEvent.builder<String>().event("news-event").id(offset).data(rec.value()).build())
+                    //.also{rec.receiverOffset().acknowledge()}
+                }
+                emit(null)
+            }.transformLatest {
+                if (it != null) emit(it)
+                while (true) {
+                    delay(20_000)
+                    emit(HEART_BEAT_SERVER_SENT_EVENT)
+                }
+            }.onCompletion {
+                consumers.remove(consumerKey)
+                log.info("Removed consumer with key=[$consumerKey]")
+            }
+        }
+    }
+
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @GetMapping("/events/no-ack/sse", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
+    suspend fun noAckSSEFlowWithHeartbeat(
         @RequestParam("group", defaultValue = "news-group-1") group: String = "news-group-1",
         @RequestParam("offsets") offsets: String? = null,
         response: ServerHttpResponse,
@@ -84,30 +138,10 @@ class SseController(val adminClient: AdminClient,
             partitionOffsets = offsets?.toKafkaOffsetMap() ?: mutableMapOf()
         ).let { (receiver, consumerKey) ->
             flow {
-                //this initial event is needed to re-route ack traffic to the container, which started the SSE, since
-                //acks can only be executed by the consumer that served the original message
-                emit(consumerInfoEvent(consumerKey, "session-${uuid()}"))
-                //start consumer
-                receiver.receive().doOnSubscribe {
-                    receiver.doOnConsumer{ consumer -> consumer to consumer.partitionsFor(TEST_TOPIC) }
-                        .doOnSuccess{ (consumer, partitions) ->
-                            log.info("Partitions for ${consumer.groupMetadata()}: $partitions")
-                            val underlying = underlyingKafkaConsumer(consumer)
-                            consumers[consumerKey] = underlying to null
-                            log.info("Added consumer with key=[$consumerKey]")
-                        }.subscribe()
-                }.asFlow().collect { rec ->
+                receiver.receive().asFlow().collect { rec ->
                     // receiver.receive().asFlow().collect { rec ->
                     "key=${rec.key()} offset=${rec.offset()} partition=${rec.partition()} topic=${rec.topic()}".also(log::info)
                     val offset = "${rec.partition()}:${rec.offset()}"
-                    //here we commit the previously received offset, which MUST happen here, because the
-                    //KafkaConsumer must be addressed within it's dedicated Thread. The dedicated Thread
-                    //is only available here
-                    consumers[consumerKey]?.let{(consumer, commitMessage) ->
-                        commitMessage?.let{consumer.commitSync(commitMessage.toCommit)}
-                        log.info("Committed $commitMessage")
-                    }
-
                     emit(
                         ServerSentEvent.builder<String>().event("news-event").id(offset).data(rec.value())
                             .build()
@@ -167,9 +201,11 @@ class SseController(val adminClient: AdminClient,
     private fun consumerInfoEvent(consumerKey: String, sessionId: String) =
         ServerSentEvent.builder<String>().event("consumer-connected")
             .data(objectMapper.writeValueAsString(mapOf("consumerId" to consumerKey, "sessionId" to sessionId)))
-            .comment("This metadata is needed to acknowledge offsets via a separate PUT request to: http://localhost:$serverPort/consumers/$consumerKey/offsets/{offsets}. " +
-                    "\n- Provide the offsets in the form of: <partition1>:<offset1>,<partition-n>:<offset-n>. E.g. 0:10,1:20,2:23" +
-                    "\n- Use a cookie SessionId=[$sessionId] so that the ack request can be routed to the container of the consumer that serves the SSE connection")
+            .comment(
+                "This metadata is needed to acknowledge offsets via a separate PUT request to: http://localhost:$serverPort/consumers/$consumerKey/offsets/{offsets}. " +
+                        "\n- Provide the offsets in the form of: <partition1>:<offset1>,<partition-n>:<offset-n>. E.g. 0:10,1:20,2:23" +
+                        "\n- Use a cookie SessionId=[$sessionId] so that the ack request can be routed to the container of the consumer that serves the SSE connection"
+            )
             .build()
 
     companion object {
