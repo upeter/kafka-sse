@@ -16,6 +16,7 @@ import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.http.codec.ServerSentEvent
@@ -32,9 +33,9 @@ import java.util.concurrent.ConcurrentHashMap
 data class CommitMessage(val consumerKey: String, val toCommit: Map<TopicPartition, OffsetAndMetadata>)
 
 @RestController
-class SseController(val adminClient: AdminClient) {
+class SseController(val adminClient: AdminClient, @Value("\${kafka.boostrap.server}") val boostrapServer:String) {
 
-    val consumers = ConcurrentHashMap<String, KafkaConsumer<*, *>>()
+    val consumers = ConcurrentHashMap<String, Pair<KafkaConsumer<*, *>, CommitMessage?>>()
 
     @GetMapping("/infinite/sse", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
     fun sseFlow(): Flow<ServerSentEvent<String>> = flow {
@@ -47,20 +48,19 @@ class SseController(val adminClient: AdminClient) {
         }
     }
 
-
-    //    @PutMapping("/consumers/groups/{group}/offsets/{offsets}")
-//    fun offset(  @PathVariable("group") group: String = "news-group-1", @PathVariable("offsets") offsets: String) {
     @PutMapping("/consumers/{consumerKey}/offsets/{offsets}")
     suspend fun offset(@PathVariable("consumerKey") consumerKey: String, @PathVariable("offsets") offsets: String) {
         val toCommit = offsets.toKafkaOffsetMap().map { (partition, offset) ->
             TopicPartition(TEST_TOPIC, partition) to OffsetAndMetadata(offset)
-        }.toMap()
-        // only works when no consumer is connected
+        }.toMap().let{CommitMessage(consumerKey, it)}
+
+        //Commit via admin API only works when NOT consumer is connected
         //val result = adminClient.alterConsumerGroupOffsets(group, toCommit)
         //log.info(result.all().get().toString())
 
-        consumers[consumerKey]?.let { consumer ->
-            //won't work because all operations for consumer need to happen in the Consumer Thread
+        consumers[consumerKey]?.let { (consumer, _) ->
+            consumers[consumerKey] = consumer to toCommit
+            //won't work because all operations for consumer need to happen in the dedicated Consumer Thread
             //consumer.commitAsync(toCommit.toMutableMap(), (OffsetCommitCallback {particionts, ex -> log.info(particionts.toString(), ex)}))
         } ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Consumer with id=[$consumerKey] to found")
     }
@@ -81,23 +81,29 @@ class SseController(val adminClient: AdminClient) {
             partitionOffsets = offsets?.toKafkaOffsetMap() ?: mutableMapOf()
         ).let { (receiver, consumerKey) ->
             flow {
+                //needed to re-route ack traffic to the container, which started the SSE, since
+                //acks can only be executed by the consumer that served the original message
                 emit(consumerInfoEvent(consumerKey, "session-${uuid()}"))
                 receiver.receive().doOnSubscribe {
-
-                    receiver.doOnConsumer({ consumer -> consumer to consumer.partitionsFor(TEST_TOPIC) })
-                        .doOnSuccess({ (consumer, partitions) ->
-
-                            println("======Partitions $partitions")
-//                            consumer as reactor.kafka.receiver.internals.ConsumerHandler<*, *>
+                    receiver.doOnConsumer{ consumer -> consumer to consumer.partitionsFor(TEST_TOPIC) }
+                        .doOnSuccess{ (consumer, partitions) ->
+                            log.info("Partitions for ${consumer.groupMetadata()}: $partitions")
                             val underlying = underlyingKafkaConsumer(consumer)
-
-                            consumers[consumerKey] = underlying
+                            consumers[consumerKey] = underlying to null
                             log.info("Added consumer with key=[$consumerKey]")
-                        }).subscribe()
+                        }.subscribe()
                 }.asFlow().collect { rec ->
                     // receiver.receive().asFlow().collect { rec ->
                     "key=${rec.key()} offset=${rec.offset()} partition=${rec.partition()} topic=${rec.topic()}".also(log::info)
                     val offset = "${rec.partition()}:${rec.offset()}"
+                    //here we commit the previously received offset, which MUST happen here, because the
+                    //KafkaConsumer must be addressed within it's dedicated Thread. The dedicated Thread
+                    //is only available here
+                    consumers[consumerKey]?.let{(consumer, commitMessage) ->
+                        commitMessage?.let{consumer.commitSync(commitMessage.toCommit)}
+                        log.info("Committed $commitMessage")
+                    }
+
                     emit(
                         ServerSentEvent.builder<String>().event("news-event").id(offset).data(rec.value())
                             .build()
@@ -130,7 +136,7 @@ class SseController(val adminClient: AdminClient) {
             //ConsumerConfig.CLIENT_ID_CONFIG to "fixed-client",// UUID.randomUUID().toString(),//"news-client-1",
             ConsumerConfig.GROUP_ID_CONFIG to group,
             ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG to false,
-            ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG to "localhost:9093",
+            ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG to boostrapServer,
             ConsumerConfig.AUTO_OFFSET_RESET_CONFIG to "earliest"
         )
         val consumerOptions: ReceiverOptions<String, String> = ReceiverOptions.create<String, String>(consumerProps)
@@ -172,6 +178,9 @@ class SseController(val adminClient: AdminClient) {
 
         val TEST_TOPIC = "test-topic"
 
+        /**
+         * Heavy hack to retrieve KafkaConsumer from Proxy
+         */
         fun underlyingKafkaConsumer(consumer: Consumer<*, *>) =
             java.lang.reflect.Proxy.getInvocationHandler(consumer).let { ih ->
                 ih.javaClass.declaredFields.first().run {
