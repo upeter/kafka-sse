@@ -1,0 +1,32 @@
+version: '2'
+services:
+#  zookeeper:
+#    image: wurstmeister/zookeeper
+#    ports:
+#      - "2181:2181"
+#  kafka-old:
+#    image: wurstmeister/kafka
+#    ports:
+#      - "9093:9092"
+##    hostname: kafka
+#    depends_on:
+#      - zookeeper
+#    environment:
+#      DOCKER_API_VERSION: 1.22
+#      KAFKA_ADVERTISED_HOST_NAME: "${DOCKERHOST}"
+#      KAFKA_CREATE_TOPICS: "test-topic:5:1  "
+#      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+#    volumes:
+#      - ./data/1/kafka/:/kafka/
+#    extra_hosts:
+#      - "dockerhost:$DOCKERHOST"
+
+  kafka:
+    image: moeenz/docker-kafka-kraft:latest
+    restart: always
+    ports:
+      - "9093:9093"
+    environment:
+      - KRAFT_CONTAINER_HOST_NAME=kafka
+      - KRAFT_CREATE_TOPICS=test-topic
+      - KRAFT_PARTITIONS_PER_TOPIC=5
