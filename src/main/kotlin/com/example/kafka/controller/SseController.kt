@@ -58,7 +58,7 @@ class SseController(
             TopicPartition(TEST_TOPIC, partition) to OffsetAndMetadata(offset)
         }.toMap().let { CommitMessage(consumerKey, it) }
 
-        //Commit via admin API only works when NOT consumer is connected
+        //Commit via admin API only works when NO consumer is connected
         //val result = adminClient.alterConsumerGroupOffsets(group, toCommit)
         //log.info(result.all().get().toString())
 
