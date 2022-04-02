@@ -2,19 +2,15 @@ package com.example.kafka
 
 import com.example.kafka.SampleProducer.Companion.BOOTSTRAP_SERVERS
 import com.example.kafka.SampleProducer.Companion.TOPIC
-import com.example.kafka.service.NewsItem
-import com.fasterxml.jackson.module.kotlin.jacksonMapperBuilder
+import com.example.kafka.domain.NewsItem
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.reactive.asFlow
-import kotlinx.coroutines.reactive.publish
 import kotlinx.coroutines.reactor.asFlux
 import org.apache.kafka.clients.producer.ProducerConfig
 import org.apache.kafka.clients.producer.ProducerRecord
-import org.apache.kafka.common.serialization.IntegerSerializer
 import org.apache.kafka.common.serialization.StringSerializer
 import org.slf4j.LoggerFactory
 import reactor.core.publisher.Flux
@@ -25,7 +21,6 @@ import reactor.kafka.sender.SenderResult
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * Sample producer application using Reactive API for Kafka.

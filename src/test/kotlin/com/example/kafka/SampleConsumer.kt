@@ -1,25 +1,13 @@
 package com.example.kafka
 
-import com.example.kafka.service.KafkaConsumerService
-import com.example.kafka.service.NewsItem
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.apache.kafka.clients.consumer.ConsumerConfig
-import org.apache.kafka.clients.producer.ProducerConfig
-import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization.IntegerDeserializer
-import org.apache.kafka.common.serialization.IntegerSerializer
 import org.apache.kafka.common.serialization.StringDeserializer
-import org.apache.kafka.common.serialization.StringSerializer
 import org.slf4j.LoggerFactory
-import reactor.core.publisher.Flux
 import reactor.kafka.receiver.KafkaReceiver
 import reactor.kafka.receiver.ReceiverOptions
 import reactor.kafka.receiver.ReceiverRecord
-import reactor.kafka.sender.KafkaSender
-import reactor.kafka.sender.SenderOptions
-import reactor.kafka.sender.SenderRecord
-import reactor.kafka.sender.SenderResult
-import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
