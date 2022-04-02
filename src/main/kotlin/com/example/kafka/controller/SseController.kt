@@ -139,13 +139,10 @@ class SseController(
         ).let { (receiver, consumerKey) ->
             flow {
                 receiver.receive().asFlow().collect { rec ->
-                    // receiver.receive().asFlow().collect { rec ->
                     "key=${rec.key()} offset=${rec.offset()} partition=${rec.partition()} topic=${rec.topic()}".also(log::info)
                     val offset = "${rec.partition()}:${rec.offset()}"
-                    emit(
-                        ServerSentEvent.builder<String>().event("news-event").id(offset).data(rec.value())
-                            .build()
-                    )//.also{rec.receiverOffset().acknowledge()}
+                    emit(ServerSentEvent.builder<String>().event("news-event").id(offset).data(rec.value()).build())
+                //.also{rec.receiverOffset().acknowledge()}
                 }
                 emit(null)
             }.transformLatest {
@@ -154,9 +151,6 @@ class SseController(
                     delay(20_000)
                     emit(HEART_BEAT_SERVER_SENT_EVENT)
                 }
-            }.onCompletion {
-                consumers.remove(consumerKey)
-                log.info("Removed consumer with key=[$consumerKey]")
             }
         }
     }
